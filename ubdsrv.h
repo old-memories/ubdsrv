@@ -74,7 +74,7 @@ struct ubd_io {
 #define UBDSRV_IO_HANDLING		(1UL << 3)
 #define UBDSRV_NEED_GET_DATA		(1UL << 4)
 	unsigned int flags;
-	unsigned int result;
+	int result;
 };
 
 struct ubdsrv_queue {
