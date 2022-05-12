@@ -333,6 +333,21 @@ static int ubdsrv_queue_init(struct ubdsrv_dev *dev, int q_id)
 	return ret;
 }
 
+static void ubdsrv_close_tgt_shm(struct ubdsrv_dev *dev)
+{
+	char buf[64];
+	unsigned pid = getpid();
+
+	snprintf(buf, 64, "%s_%d", UBDSRV_SHM_DIR, pid);
+
+	if (dev->ctrl_dev->shm_fd >= 0) {
+		if(munmap(dev->ctrl_dev->shm_addr, UBDSRV_SHM_SIZE))
+			syslog(LOG_ERR, "%s unmap tgt posix shm %s %d %p failed", __func__,
+				   buf, dev->ctrl_dev->shm_fd, dev->ctrl_dev->shm_addr);
+		close(dev->ctrl_dev->shm_fd);
+	}
+}
+
 static void ubdsrv_deinit(struct ubdsrv_dev *dev)
 {
 	int i;
@@ -343,6 +358,8 @@ static void ubdsrv_deinit(struct ubdsrv_dev *dev)
 
 	for (i = 0; i < dev->ctrl_dev->dev_info.nr_hw_queues; i++)
 		ubdsrv_queue_deinit(&dev->queues[i]);
+	
+	ubdsrv_close_tgt_shm(dev);
 
 	ubdsrv_tgt_exit(&dev->ctrl_dev->tgt);
 
