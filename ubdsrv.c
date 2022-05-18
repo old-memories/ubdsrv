@@ -157,8 +157,8 @@ static int ubdsrv_submit_fetch_commands(struct ubdsrv_queue *q)
 		commit_queue_io_cmd(q, tail + cnt);
 	}
 
-	INFO(syslog(LOG_INFO, "%s: queued %d, to_handle %d\n",
-				__func__, cnt, to_handle));
+	INFO(syslog(LOG_INFO, "%s: q_id %d queued %d, to_handle %d\n",
+				__func__,q->q_id , cnt, to_handle));
 
 	return cnt + to_handle;
 }
@@ -454,7 +454,7 @@ static void ubdsrv_handle_cqe(struct ubdsrv_uring *r,
 	q->cmd_inflight -= 1;
 
 	if (cqe->res <= 0) {
-		syslog(LOG_ERR, "%s: user_data %lx res %d"
+		syslog(LOG_ERR, "%s: user_data %llx res %d"
 			" (qid %d tag %d, cmd_op %d) iof %x\n",
 			__func__, cqe->user_data, cqe->res, 
 			qid, tag, last_cmd_op, io->flags);
@@ -521,7 +521,7 @@ static void *ubdsrv_io_handler_fn(void *data)
 		int to_submit, submitted, reapped;
 
 		to_submit = ubdsrv_submit_fetch_commands(q);
-		INFO(syslog(LOG_INFO, "to_submit %d\n", to_submit));
+		INFO(syslog(LOG_INFO, "q_id %d to_submit %d\n",q->q_id, to_submit));
 
 		if (ubdsrv_queue_is_done(q))
 			break;
@@ -599,7 +599,7 @@ static void ubdsrv_io_handler(void *data)
 	 */
 	for(i = 0; i < nr_queues; i++) {
 		pthread_join(this_dev.threads[i], &pthread_ret);
-		syslog(LOG_INFO, "%s: tid: %d, ret: %d", __func__,
+		syslog(LOG_INFO, "%s: tid: %ld, ret: %d", __func__,
 			this_dev.threads[i], *(int *)pthread_ret);
 	}
 	

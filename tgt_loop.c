@@ -70,7 +70,8 @@ static int loop_prepare_io(struct ubdsrv_tgt_info *tgt)
 
 	fd = open(file, O_RDWR | O_DIRECT);
 	if (fd < 0) {
-		syslog(LOG_ERR, "%s backing file %s can't be opened\n", file);
+		syslog(LOG_ERR, "%s backing file %s can't be opened\n", 
+				__func__, file);
 		return -1;
 	}
 
