@@ -118,7 +118,7 @@ struct ubdsrv_dev {
 	struct ubdsrv_ctrl_dev	*ctrl_dev;
 	int cdev_fd;
 
-	struct ubdsrv_queue	*queues;
+	struct ubdsrv_queue	*queues[MAX_NR_HW_QUEUES];
 	pthread_t               *threads;
 };
 

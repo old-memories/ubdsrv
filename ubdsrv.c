@@ -218,6 +218,9 @@ static void ubdsrv_queue_deinit(struct ubdsrv_queue *q)
 {
 	int i;
 
+	if (!q)
+		return;
+
 	if (q->ring.ring_fd > 0) {
 		ubdsrv_io_uring_unregister_files(&q->ring);
 		close(q->ring.ring_fd);
@@ -233,18 +236,29 @@ static void ubdsrv_queue_deinit(struct ubdsrv_queue *q)
 			q->ios[i].buf_addr = NULL;
 		}
 	}
+	q->dev->queues[q->q_id] = NULL;
+	free(q);
 }
 
 static int ubdsrv_queue_init(struct ubdsrv_dev *dev, int q_id)
 {
-	struct ubdsrv_queue *q = &dev->queues[q_id];
+	struct ubdsrv_queue *q = NULL;
 	struct ubdsrv_ctrl_dev *ctrl_dev = dev->ctrl_dev;
 	int depth = ctrl_dev->dev_info.queue_depth;
 	int i, ret = -1;
 	int cmd_buf_size, io_buf_size;
 	unsigned long off;
 	int ring_depth = depth + ctrl_dev->tgt.tgt_ring_depth;
-
+	int queue_size = sizeof(struct ubdsrv_queue) 
+			+ sizeof(struct ubd_io)
+			* ctrl_dev->dev_info.queue_depth;
+	
+	q = calloc(1, queue_size);
+	if (!q)
+		goto fail;
+	
+	dev->queues[q_id] = q;
+	
 	q->dev = dev;
 	q->stopping = 0;
 	q->q_id = q_id;
@@ -262,6 +276,8 @@ static int ubdsrv_queue_init(struct ubdsrv_dev *dev, int q_id)
 
 	io_buf_size = ctrl_dev->dev_info.block_size *
 		ctrl_dev->dev_info.rq_max_blocks;
+	
+	/* we pre-allocate IO buffer for each request */
 	for (i = 0; i < depth; i++) {
 		q->ios[i].buf_addr = NULL;
 		if (posix_memalign((void **)&q->ios[i].buf_addr, getpagesize(), io_buf_size))
@@ -269,7 +285,7 @@ static int ubdsrv_queue_init(struct ubdsrv_dev *dev, int q_id)
 		//q->ios[i].buf_addr = malloc(io_buf_size);
 		if (!q->ios[i].buf_addr)
 			goto fail;
-		q->ios[i].flags |= UBDSRV_NEED_FETCH_RQ | UBDSRV_IO_FREE;
+		q->ios[i].flags = UBDSRV_NEED_FETCH_RQ | UBDSRV_IO_FREE;
 	}
 
 	ret = ubdsrv_setup_ring(&q->ring, IORING_SETUP_SQE128,
@@ -312,7 +328,7 @@ static void ubdsrv_deinit(struct ubdsrv_dev *dev)
 	int i;
 
 	for (i = 0; i < dev->ctrl_dev->dev_info.nr_hw_queues; i++)
-		ubdsrv_queue_deinit(&dev->queues[i]);
+		ubdsrv_queue_deinit(dev->queues[i]);
 
 	ubdsrv_close_tgt_shm(dev);
 
@@ -322,10 +338,7 @@ static void ubdsrv_deinit(struct ubdsrv_dev *dev)
 		close(dev->cdev_fd);
 		dev->cdev_fd = -1;
 	}
-	if (dev->queues) {
-		free(dev->queues);
-		dev->queues = NULL;
-	}
+
 	if(dev->threads) {
 		free(dev->threads);
 		dev->threads = NULL;
@@ -360,13 +373,11 @@ static int ubdsrv_init(struct ubdsrv_ctrl_dev *ctrl_dev, struct ubdsrv_dev *dev)
 	int nr_queues = ctrl_dev->dev_info.nr_hw_queues;
 	int dev_id = ctrl_dev->dev_info.dev_id;
 	struct ubdsrv_tgt_info *tgt = &ctrl_dev->tgt;
-	int queue_size;
 	char buf[64];
 	int ret = -1;
 	int i;
 
 	dev->ctrl_dev = ctrl_dev;
-	dev->queues = NULL;
 	dev->cdev_fd = -1;
 
 	ubdsrv_setup_tgt_shm(dev);
@@ -379,13 +390,6 @@ static int ubdsrv_init(struct ubdsrv_ctrl_dev *ctrl_dev, struct ubdsrv_dev *dev)
 	tgt->fds[0] = dev->cdev_fd;
 
 	if (ubdsrv_prepare_io(&dev->ctrl_dev->tgt) < 0)
-		goto fail;
-
-	/* we pre-allocate IO buffer for each request */
-	queue_size = sizeof(struct ubdsrv_queue) + sizeof(struct ubd_io) *
-		ctrl_dev->dev_info.queue_depth;
-	dev->queues = calloc(nr_queues, queue_size);
-	if (!dev->queues)
 		goto fail;
 	
 	dev->threads = calloc(nr_queues, sizeof(pthread_t));
@@ -588,7 +592,7 @@ static void ubdsrv_io_handler(void *data)
 	for (i = 0; i < nr_queues; i++)
 		/* run ubdsrv_io_handler_fn in each new thread per queue */
 		pthread_create(&this_dev.threads[i], NULL, 
-			ubdsrv_io_handler_fn, &this_dev.queues[i]);
+			ubdsrv_io_handler_fn, this_dev.queues[i]);
 
 	syslog(LOG_INFO, "ubdsrv io daemon running...");
 
