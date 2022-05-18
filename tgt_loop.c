@@ -81,7 +81,7 @@ static int loop_prepare_io(struct ubdsrv_tgt_info *tgt)
 }
 
 static void loop_handle_fallocate_async(struct io_uring_sqe *sqe,
-		struct ubdsrv_io_desc *iod)
+		const struct ubdsrv_io_desc *iod)
 {
 	__u16 ubd_op = ubdsrv_get_op(iod);
 	__u32 flags = ubdsrv_get_flags(iod);
@@ -106,7 +106,7 @@ static void loop_handle_fallocate_async(struct io_uring_sqe *sqe,
 static int loop_handle_io_async(struct ubdsrv_dev *dev, int qid, int tag)
 {
 	struct ubdsrv_queue *q = &dev->queues[qid];
-	struct ubdsrv_io_desc *iod = ubdsrv_get_iod(q, tag);
+	const struct ubdsrv_io_desc *iod = ubdsrv_get_iod(q, tag);
 	struct ubd_io *io = &q->ios[tag];
 
 	struct ubdsrv_uring *r = &q->ring;
@@ -146,12 +146,16 @@ static int loop_handle_io_async(struct ubdsrv_dev *dev, int qid, int tag)
 	sqe->off = iod->start_block << 9;
 
 	ring->array[index] = index;
-
+	
+	q->tgt_io_inflight += 1;
 	commit_queue_io_cmd(q, tail + 1);
 
-	INFO(syslog(LOG_INFO, "%s: queue io op %d(%llu %llu) user_data %lx iof %x\n",
-			__func__, io_op, sqe->off, sqe->len, sqe->user_data,
-			io->flags));
+	INFO(syslog(LOG_INFO, "%s: ubd io %x %llx %u\n", __func__,
+			iod->op_flags, iod->start_sector, iod->nr_sectors));
+	INFO(syslog(LOG_INFO, "%s: queue io op %d(%llu %llx %llx)"
+				" (qid %d tag %u, cmd_op %u target: %d, user_data %llx) iof %x\n",
+			__func__, io_op, sqe->off, sqe->len, sqe->addr,
+			q->q_id, tag, io_op, 1, sqe->user_data, io->flags));
 
 	return 0;
 }
@@ -161,9 +165,11 @@ static int loop_list(struct ubdsrv_tgt_info *tgt)
 	struct ubdsrv_ctrl_dev *cdev = container_of(tgt,
 			struct ubdsrv_ctrl_dev, tgt);
 
-	return snprintf(cdev->shm_addr, UBDSRV_SHM_SIZE,
-			"target type %s: backing file %s",
+	cdev->shm_offset += snprintf(cdev->shm_addr + cdev->shm_offset,
+			UBDSRV_SHM_SIZE - cdev->shm_offset,
+			"target type: %s backing file: %s\n",
 			tgt->ops->name, tgt->loop.backing_file);
+	return 0;
 }
 
 struct ubdsrv_tgt_type  loop_tgt_type = {

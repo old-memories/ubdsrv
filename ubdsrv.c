@@ -30,6 +30,10 @@
  * all sqes have been free, exit itself. Then STOP_DEV returns.
  */
 
+struct ubdsrv_dev this_dev;
+
+static void *ubdsrv_io_handler_fn(void *data);
+
 static int prep_io_cmd(struct ubdsrv_queue *q, struct io_uring_sqe *sqe,
 		unsigned tag)
 {
@@ -79,7 +83,7 @@ static int prep_io_cmd(struct ubdsrv_queue *q, struct io_uring_sqe *sqe,
 
 	io->flags &= ~(UBDSRV_IO_FREE
 			|UBDSRV_NEED_COMMIT_RQ_COMP|UBDSRV_NEED_GET_DATA);
-	return 0;
+	return 1;
 }
 
 /*
@@ -93,6 +97,7 @@ static int queue_io_cmd(struct ubdsrv_queue *q, unsigned tail, unsigned tag)
 	struct io_sq_ring *ring = &r->sq_ring;
 	unsigned index, next_tail = tail + 1;
 	struct io_uring_sqe *sqe;
+	int ret;
 
 	if (next_tail == atomic_load_acquire(ring->head)) {
 		syslog(LOG_INFO, "ring is full, tail %u head %u\n", next_tail,
@@ -104,12 +109,11 @@ static int queue_io_cmd(struct ubdsrv_queue *q, unsigned tail, unsigned tag)
 	/* IORING_SETUP_SQE128 */
 	sqe = ubdsrv_uring_get_sqe(r, index, true);
 
-	if (prep_io_cmd(q, sqe, tag))
-		return -2;
+	ret = prep_io_cmd(q, sqe, tag);
+	if (ret > 0)
+		ring->array[index] = index;
 
-	ring->array[index] = index;
-
-	return 0;
+	return ret;
 }
 
 /*
@@ -143,14 +147,14 @@ static int ubdsrv_submit_fetch_commands(struct ubdsrv_queue *q)
 			 UBDSRV_NEED_GET_DATA)))
 			continue;
 		ret = queue_io_cmd(q, tail + cnt, i);
-		if (ret)
+		if (ret < 0)
 			break;
-		cnt++;
+		cnt += ret;
 	}
 
-	if (cnt) {
+	if (cnt > 0) {
+		q->cmd_inflight += cnt;
 		commit_queue_io_cmd(q, tail + cnt);
-		q->inflight += cnt;
 	}
 
 	INFO(syslog(LOG_INFO, "%s: queued %d, to_handle %d\n",
@@ -159,17 +163,9 @@ static int ubdsrv_submit_fetch_commands(struct ubdsrv_queue *q)
 	return cnt + to_handle;
 }
 
-/*
- * Now STOP DEV ctrl command has been sent to /dev/ubd-control,
- * and wait until all pending fetch commands are canceled
- */
-static void ubdsrv_drain_fetch_commands(struct ubdsrv_dev *dev)
+static int ubdsrv_queue_is_done(struct ubdsrv_queue *q)
 {
-	/* So far, only support SQ */
-	struct ubdsrv_queue *q = &dev->queues[0];
-
-	while (q->inflight)
-		usleep(100000);
+	return q->stopping && (!q->cmd_inflight && !q->tgt_io_inflight);
 }
 
 /* used for allocating zero copy vma space */
@@ -192,46 +188,6 @@ static inline int ubd_io_buf_size(struct ubdsrv_dev *dev)
 	unsigned nr_queues = dev->ctrl_dev->dev_info.nr_hw_queues;
 
 	return ubd_queue_io_buf_size(dev) * nr_queues;
-}
-
-/* mmap vm space for remapping block io request pages */
-static void ubdsrv_deinit_io_bufs(struct ubdsrv_dev *dev)
-{
-	unsigned long sz = ubd_io_buf_size(dev);
-
-	if (dev->io_buf_start) {
-		munmap(dev->io_buf_start, sz);
-		dev->io_buf_start = NULL;
-	}
-}
-
-/* mmap vm space for remapping block io request pages */
-static int ubdsrv_init_io_bufs(struct ubdsrv_dev *dev)
-{
-	unsigned long sz = ubd_io_buf_size(dev);
-	unsigned nr_queues = dev->ctrl_dev->dev_info.nr_hw_queues;
-	int i;
-	void *addr;
-
-	dev->io_buf_start = NULL;
-	if (!(dev->ctrl_dev->dev_info.flags & (1 << UBD_F_SUPPORT_ZERO_COPY)))
-		return 0;
-
-	addr = mmap(0, sz, PROT_READ | PROT_WRITE,
-			MAP_SHARED | MAP_POPULATE, dev->cdev_fd,
-			UBDSRV_IO_BUF_OFFSET);
-	if (addr == MAP_FAILED)
-		return -1;
-
-	dev->io_buf_start = addr;
-
-	for (i = 0; i < nr_queues; i++) {
-		struct ubdsrv_queue *q = &dev->queues[i];
-
-		q->io_buf = dev->io_buf_start + i * ubd_queue_io_buf_size(dev);
-	}
-
-	return 0;
 }
 
 static void ubdsrv_init_io_cmds(struct ubdsrv_dev *dev, struct ubdsrv_queue *q)
@@ -289,6 +245,7 @@ static int ubdsrv_queue_init(struct ubdsrv_dev *dev, int q_id)
 	unsigned long off;
 	int ring_depth = depth + ctrl_dev->tgt.tgt_ring_depth;
 
+	q->dev = dev;
 	q->stopping = 0;
 	q->q_id = q_id;
 	/* FIXME: depth has to be PO 2 */
@@ -342,9 +299,11 @@ static void ubdsrv_close_tgt_shm(struct ubdsrv_dev *dev)
 
 	if (dev->ctrl_dev->shm_fd >= 0) {
 		if(munmap(dev->ctrl_dev->shm_addr, UBDSRV_SHM_SIZE))
-			syslog(LOG_ERR, "%s unmap tgt posix shm %s %d %p failed", __func__,
-				   buf, dev->ctrl_dev->shm_fd, dev->ctrl_dev->shm_addr);
+			syslog(LOG_ERR, "%s unmap tgt posix shm %s %d %p failed", 
+					__func__, buf, dev->ctrl_dev->shm_fd, 
+					dev->ctrl_dev->shm_addr);
 		close(dev->ctrl_dev->shm_fd);
+		dev->ctrl_dev->shm_fd = -1;
 	}
 }
 
@@ -352,13 +311,9 @@ static void ubdsrv_deinit(struct ubdsrv_dev *dev)
 {
 	int i;
 
-	ubdsrv_drain_fetch_commands(dev);
-
-	ubdsrv_deinit_io_bufs(dev);
-
 	for (i = 0; i < dev->ctrl_dev->dev_info.nr_hw_queues; i++)
 		ubdsrv_queue_deinit(&dev->queues[i]);
-	
+
 	ubdsrv_close_tgt_shm(dev);
 
 	ubdsrv_tgt_exit(&dev->ctrl_dev->tgt);
@@ -370,6 +325,10 @@ static void ubdsrv_deinit(struct ubdsrv_dev *dev)
 	if (dev->queues) {
 		free(dev->queues);
 		dev->queues = NULL;
+	}
+	if(dev->threads) {
+		free(dev->threads);
+		dev->threads = NULL;
 	}
 }
 
@@ -428,14 +387,15 @@ static int ubdsrv_init(struct ubdsrv_ctrl_dev *ctrl_dev, struct ubdsrv_dev *dev)
 	dev->queues = calloc(nr_queues, queue_size);
 	if (!dev->queues)
 		goto fail;
+	
+	dev->threads = calloc(nr_queues, sizeof(pthread_t));
+	if (!dev->threads)
+		goto fail;
+
 	for (i = 0; i < nr_queues; i++) {
 		if (ubdsrv_queue_init(dev, i))
 			goto fail;
 	}
-
-	ret = ubdsrv_init_io_bufs(dev);
-	if (ret)
-		goto fail;
 
 	return 0;
 fail:
@@ -448,25 +408,16 @@ static void ubdsrv_handle_tgt_cqe(struct ubdsrv_dev *dev,
 {
 	int tag = cqe->user_data & 0xffff;
 	struct ubd_io *io = &q->ios[tag];
-	struct ubdsrv_io_desc *iod = ubdsrv_get_iod(q, tag);
 
-	io->result = cqe->res;
-
-	/* Mark this IO as free and ready for issuing to ubd driver */
-	io->flags |= (UBDSRV_NEED_COMMIT_RQ_COMP | UBDSRV_IO_FREE);
-
-	/* clear handling */
-	io->flags &= ~UBDSRV_IO_HANDLING;
+	q->tgt_io_inflight -= 1;
+	ubdsrv_mark_io_done(io, cqe->res);
 }
 
 static inline int ubdsrv_need_get_data(struct ubdsrv_ctrl_dev *ctrl_dev,
 		struct ubdsrv_queue *q, unsigned tag)
 {
-	struct ubdsrv_io_desc *iod = ubdsrv_get_iod(q, tag);
+	const struct ubdsrv_io_desc *iod = ubdsrv_get_iod(q, tag);
 	struct ubd_io *io = &q->ios[tag];
-
-	if ((ctrl_dev->dev_info.flags & (1 << UBD_F_SUPPORT_ZERO_COPY)))
-		return 0;
 
 	/* need to copy write data first */
 	if (ubdsrv_get_op(iod) != UBD_IO_OP_WRITE)
@@ -480,34 +431,40 @@ static inline int ubdsrv_need_get_data(struct ubdsrv_ctrl_dev *ctrl_dev,
 static void ubdsrv_handle_cqe(struct ubdsrv_uring *r,
 		struct io_uring_cqe *cqe, void *data)
 {
-	struct ubdsrv_dev *dev = data;
+	struct ubdsrv_queue *q = container_of(r, struct ubdsrv_queue, ring);
+	struct ubdsrv_dev *dev = q->dev;
 	struct ubdsrv_ctrl_dev *ctrl_dev = dev->ctrl_dev;
 	struct ubdsrv_tgt_info *tgt = &ctrl_dev->tgt;
-	struct ubdsrv_queue *q = container_of(r, struct ubdsrv_queue, ring);
 	int tag = cqe->user_data & 0xffff;
 	int qid = (cqe->user_data >> 16) & 0xffff;
 	unsigned last_cmd_op = cqe->user_data >> 32 & 0x7fffffff;
 	int fetch = (cqe->res != UBD_IO_RES_ABORT);
 	struct ubd_io *io = &q->ios[tag];
 
-	INFO(syslog(LOG_INFO, "%s: user_data %lx res %d (qid %d tag %d, cmd_op %d) iof %x\n",
-			__func__, cqe->user_data, cqe->res, qid, tag,
-			last_cmd_op, io->flags));
+	INFO(syslog(LOG_INFO, "%s: user_data %lx res %d"
+			" (qid %d tag %d, cmd_op %d) iof %x\n",
+			__func__, cqe->user_data, cqe->res, 
+			qid, tag, last_cmd_op, io->flags));
 
 	if (cqe->user_data & (1ULL << 63)) {
 		ubdsrv_handle_tgt_cqe(dev, q, cqe);
 		return;
 	}
 
-	if (cqe->res <= 0)
+	q->cmd_inflight -= 1;
+
+	if (cqe->res <= 0) {
+		syslog(LOG_ERR, "%s: user_data %lx res %d"
+			" (qid %d tag %d, cmd_op %d) iof %x\n",
+			__func__, cqe->user_data, cqe->res, 
+			qid, tag, last_cmd_op, io->flags);
 		return;
+	}
 
 	if (!fetch) {
 		q->stopping = 1;
 		io->flags &= ~UBDSRV_NEED_FETCH_RQ;
 	}
-
-	q->inflight--;
 
 	/*
 	 * So far, only sync tgt's io handling is implemented.
@@ -543,24 +500,56 @@ static void ubdsrv_handle_cqe(struct ubdsrv_uring *r,
 	}
 }
 
-static sig_atomic_t volatile ubdsrv_running = 1;
 static void sig_handler(int sig)
 {
-	if (sig == SIGINT || sig == SIGQUIT) {
-		syslog(LOG_INFO, "got int or quit signal");
-		ubdsrv_running = 0;
+	if (sig == SIGTERM) {
+		syslog(LOG_INFO, "TODO: got SIGTERM signal");
 	}
 }
 
+static void *ubdsrv_io_handler_fn(void *data)
+{
+	struct ubdsrv_queue *q = data;
+	unsigned dev_id = q->dev->ctrl_dev->dev_info.dev_id;
+	
+	INFO(syslog(LOG_INFO, "ubd dev %d queue %d started",
+				dev_id, q->q_id));
+	
+	setpriority(PRIO_PROCESS, getpid(), -20);
+
+	do {
+		int to_submit, submitted, reapped;
+
+		to_submit = ubdsrv_submit_fetch_commands(q);
+		INFO(syslog(LOG_INFO, "to_submit %d\n", to_submit));
+
+		if (ubdsrv_queue_is_done(q))
+			break;
+		submitted = io_uring_enter(&q->ring, to_submit, 1,
+				IORING_ENTER_GETEVENTS);
+		reapped = ubdsrv_reap_events_uring(&q->ring,
+				ubdsrv_handle_cqe, NULL);
+		INFO(syslog(LOG_INFO, "io_submit %d, submitted %d, reapped %d",
+				to_submit, submitted, reapped));
+	} while (1);
+	
+	INFO(syslog(LOG_INFO, "thread of qid: %d ready to exit\n", q->q_id));
+
+	return NULL;
+}
+
+static sigset_t signal_mask;
 static void ubdsrv_io_handler(void *data)
 {
 	struct ubdsrv_ctrl_dev *ctrl_dev = data;
 	struct ubdsrv_tgt_info *tgt = &ctrl_dev->tgt;
 	int dev_id = ctrl_dev->dev_info.dev_id;
+	int nr_queues = ctrl_dev->dev_info.nr_hw_queues;
 	struct ubdsrv_dev dev;
-	int ret, pid_fd;
+	int ret, pid_fd, i;
 	char buf[32];
 	char pid_file[64];
+	void *pthread_ret;
 
 	snprintf(buf, 32, "%s-%d", "ubdsrvd", dev_id);
 	openlog(buf, LOG_PID, LOG_USER);
@@ -580,41 +569,45 @@ static void ubdsrv_io_handler(void *data)
 	}
 	close(pid_fd);
 
-	if (signal(SIGINT, sig_handler) == SIG_ERR)
-		goto out;
-	if (signal(SIGQUIT, sig_handler) == SIG_ERR)
+	if (signal(SIGTERM, sig_handler) == SIG_ERR)
 		goto out;
 
-	ret = ubdsrv_init(ctrl_dev, &dev);
+	/* make sure SIGTERM won't be blocked */
+	sigemptyset(&signal_mask);
+	sigaddset(&signal_mask, SIGINT);
+	sigaddset(&signal_mask, SIGTERM);
+	/* TODO: SIG_UNBLOCK or SIG_BLOCK? */
+	pthread_sigmask(SIG_UNBLOCK, &signal_mask, NULL);
+
+	ret = ubdsrv_init(ctrl_dev, &this_dev);
 	if (ret) {
 		syslog(LOG_ERR, "start ubsrv failed %d", ret);
 		goto out;
 	}
 
-	setpriority(PRIO_PROCESS, getpid(), -20);
+	for (i = 0; i < nr_queues; i++)
+		/* run ubdsrv_io_handler_fn in each new thread per queue */
+		pthread_create(&this_dev.threads[i], NULL, 
+			ubdsrv_io_handler_fn, &this_dev.queues[i]);
 
-	do {
-		struct ubdsrv_queue *q = &dev.queues[0];
-		int to_submit, submitted, reapped;
+	syslog(LOG_INFO, "ubdsrv io daemon running...");
 
-		to_submit = ubdsrv_submit_fetch_commands(q);
-		INFO(syslog(LOG_INFO, "to_submit %d\n", to_submit));
-
-		if (!q->inflight && q->stopping)
-			break;
-		submitted = io_uring_enter(&q->ring, to_submit, 1,
-				IORING_ENTER_GETEVENTS);
-		reapped = ubdsrv_reap_events_uring(&q->ring,
-				ubdsrv_handle_cqe, &dev);
-		INFO(syslog(LOG_INFO, "io_submit %d, submitted %d, reapped %d",
-				to_submit, submitted, reapped));
-	} while (ubdsrv_running);
-
-	ubdsrv_deinit(&dev);
+	/*
+ 	 * Now STOP DEV ctrl command has been sent to /dev/ubd-control
+ 	 * (1)wait until all pending fetch commands are canceled
+	 * (2)wait until all per queue threads have been exited 
+	 */
+	for(i = 0; i < nr_queues; i++) {
+		pthread_join(this_dev.threads[i], &pthread_ret);
+		syslog(LOG_INFO, "%s: tid: %d, ret: %d", __func__,
+			this_dev.threads[i], *(int *)pthread_ret);
+	}
+	
+	ubdsrv_deinit(&this_dev);
 
  out:
+	syslog(LOG_INFO, "end ubdsrv io daemon");
 	unlink(pid_file);
-	syslog(LOG_INFO, "end ubdsrv io daemon, running %d", ubdsrv_running);
 	closelog();
 }
 

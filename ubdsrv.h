@@ -56,7 +56,7 @@
 
 #define INFO(s)
 
-#define UBDSRV_SHM_SIZE  512
+#define UBDSRV_SHM_SIZE  1024
 
 struct ubdsrv_ctrl_dev {
 	struct ubdsrv_uring ring;
@@ -68,6 +68,7 @@ struct ubdsrv_ctrl_dev {
 
 	int shm_fd;
 	char *shm_addr;
+	unsigned int shm_offset;
 };
 
 struct ubd_io {
@@ -96,10 +97,9 @@ struct ubdsrv_queue {
 	 * by issued io_uring command beforehand.
 	 * */
 	char *io_cmd_buf;
-	void *io_buf;
 
-	unsigned inflight;
-	unsigned stopping;
+	unsigned cmd_inflight, tgt_io_inflight;
+	unsigned short stopping;
 
 	/*
 	 * ring for submit io command to ubd driver, can only be issued
@@ -109,6 +109,8 @@ struct ubdsrv_queue {
 	 */
 	struct ubdsrv_uring ring;
 
+	struct ubdsrv_dev *dev;
+
 	struct ubd_io ios[0];
 };
 
@@ -117,12 +119,12 @@ struct ubdsrv_dev {
 	int cdev_fd;
 
 	struct ubdsrv_queue	*queues;
-	void	*io_buf_start;
+	pthread_t               *threads;
 };
 
-static inline struct ubdsrv_io_desc *ubdsrv_get_iod(struct ubdsrv_queue *q, int tag)
+static inline const struct ubdsrv_io_desc *ubdsrv_get_iod(struct ubdsrv_queue *q, int tag)
 {
-        return (struct ubdsrv_io_desc *)
+        return (const struct ubdsrv_io_desc *)
                 &(q->io_cmd_buf[tag * sizeof(struct ubdsrv_io_desc)]);
 }
 
@@ -149,6 +151,17 @@ static inline void ubdsrv_mark_io_handling(struct ubd_io *io)
 	 * count us for submission
 	 */
 	io->flags |= UBDSRV_IO_HANDLING;
+}
+
+static inline void ubdsrv_mark_io_done(struct ubd_io *io, int res)
+{
+	/* Mark this IO as free and ready for issuing to ubd driver */
+	io->flags |= (UBDSRV_NEED_COMMIT_RQ_COMP | UBDSRV_IO_FREE);
+
+	/* clear handling */
+	io->flags &= ~UBDSRV_IO_HANDLING;
+
+	io->result = res;
 }
 
 int ubdsrv_start_io_daemon(struct ubdsrv_ctrl_dev *dev);

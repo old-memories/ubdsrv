@@ -159,14 +159,7 @@ static inline __u32 ubdsrv_get_blocks(const struct ubdsrv_io_desc *iod)
 
 /* issued to ubd driver via /dev/ubdcN */
 struct ubdsrv_io_cmd {
-	/*
-	 * how to support MQ ?
-	 *
-	 * Each hw queue is served by dedicated daemon? Or pthread
-	 * of this daemon?
-	 *
-	 * Served as reserved field.
-	 */
+	/* MQ support */
 	__u16	q_id;
 
 	/* for fetch/commit which result */
