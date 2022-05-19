@@ -553,7 +553,6 @@ static void ubdsrv_io_handler(void *data)
 	int ret, pid_fd, i;
 	char buf[32];
 	char pid_file[64];
-	void *pthread_ret;
 
 	snprintf(buf, 32, "%s-%d", "ubdsrvd", dev_id);
 	openlog(buf, LOG_PID, LOG_USER);
@@ -602,15 +601,16 @@ static void ubdsrv_io_handler(void *data)
 	 * (2)wait until all per queue threads have been exited 
 	 */
 	for(i = 0; i < nr_queues; i++) {
-		pthread_join(this_dev.threads[i], &pthread_ret);
-		syslog(LOG_INFO, "%s: tid: %ld, ret: %d", __func__,
-			this_dev.threads[i], *(int *)pthread_ret);
+		pthread_join(this_dev.threads[i], NULL);
+		syslog(LOG_INFO, "thread of q_id %d joined\n", 
+				__func__, i);
 	}
+
+	syslog(LOG_INFO, "end ubdsrv io daemon");
 	
 	ubdsrv_deinit(&this_dev);
 
  out:
-	syslog(LOG_INFO, "end ubdsrv io daemon");
 	unlink(pid_file);
 	closelog();
 }

@@ -223,7 +223,11 @@ static int ubdsrv_stop_dev(struct ubdsrv_ctrl_dev *dev)
 	if (ret)
 		return ret;
 
-	ubdsrv_stop_io_daemon(dev);
+	ret = ubdsrv_stop_io_daemon(dev);
+	if (ret)
+		fprintf(stderr, "dev id %d daemon is not stopped.\n",
+			dev->dev_info.dev_id);
+	return ret;
 }
 
 static void ubdsrv_dump(struct ubdsrv_ctrl_dev *dev)
