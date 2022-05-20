@@ -45,7 +45,8 @@ static int prep_io_cmd(struct ubdsrv_queue *q, struct io_uring_sqe *sqe,
 	__u64 user_data;
 
 	if (!(io->flags & UBDSRV_IO_FREE)) {
-		syslog(LOG_ERR, "io isn't free qid %d, tag %d\n", q->q_id, tag);
+		syslog(LOG_ERR, "%s: io isn't free qid %d, tag %d\n",
+				__func__, q->q_id, tag);
 		return -1;
 	}
 
@@ -59,8 +60,8 @@ static int prep_io_cmd(struct ubdsrv_queue *q, struct io_uring_sqe *sqe,
 	} else if (io->flags & UBDSRV_NEED_COMMIT_RQ_COMP) {
 			cmd_op = UBD_IO_COMMIT_REQ;
 	} else {
-		syslog(LOG_ERR, "io flags is zero, index %d, tag %d\n", index,
-				cmd->tag);
+		syslog(LOG_ERR, "%s: invalid io flag %d, qid %d tag %d\n",
+				__func__, io->flags, q->q_id, tag);
 		return -1;
 	}
 
@@ -100,8 +101,10 @@ static int queue_io_cmd(struct ubdsrv_queue *q, unsigned tail, unsigned tag)
 	int ret;
 
 	if (next_tail == atomic_load_acquire(ring->head)) {
-		syslog(LOG_INFO, "ring is full, tail %u head %u\n", next_tail,
-				*ring->head);
+		syslog(LOG_INFO, "%s: ring (qid %d tag %d) is full,"
+				" tail %u head %u\n",
+				__func__, q->q_id, tag,
+				next_tail, *ring->head);
 		return -1;
 	}
 
@@ -459,9 +462,9 @@ static void ubdsrv_handle_cqe(struct ubdsrv_uring *r,
 
 	if (cqe->res <= 0) {
 		syslog(LOG_ERR, "%s: user_data %llx res %d"
-			" (qid %d tag %d, cmd_op %d) iof %x\n",
-			__func__, cqe->user_data, cqe->res, 
-			qid, tag, last_cmd_op, io->flags);
+				" (qid %d tag %d, cmd_op %d) iof %x\n",
+				__func__, cqe->user_data, cqe->res, 
+				qid, tag, last_cmd_op, io->flags);
 		return;
 	}
 
@@ -507,7 +510,7 @@ static void ubdsrv_handle_cqe(struct ubdsrv_uring *r,
 static void sig_handler(int sig)
 {
 	if (sig == SIGTERM) {
-		syslog(LOG_INFO, "TODO: got SIGTERM signal");
+		syslog(LOG_INFO, "%s: TODO: got SIGTERM signal", __func__);
 	}
 }
 
@@ -516,8 +519,8 @@ static void *ubdsrv_io_handler_fn(void *data)
 	struct ubdsrv_queue *q = data;
 	unsigned dev_id = q->dev->ctrl_dev->dev_info.dev_id;
 	
-	INFO(syslog(LOG_INFO, "ubd dev %d queue %d started",
-				dev_id, q->q_id));
+	syslog(LOG_INFO, "%s: ubd dev %d queue %d started",
+				__func__, dev_id, q->q_id);
 	
 	setpriority(PRIO_PROCESS, getpid(), -20);
 
@@ -525,7 +528,8 @@ static void *ubdsrv_io_handler_fn(void *data)
 		int to_submit, submitted, reapped;
 
 		to_submit = ubdsrv_submit_fetch_commands(q);
-		INFO(syslog(LOG_INFO, "q_id %d to_submit %d\n",q->q_id, to_submit));
+		INFO(syslog(LOG_INFO, "%s: q_id %d to_submit %d\n",
+				__func__, q->q_id, to_submit));
 
 		if (ubdsrv_queue_is_done(q))
 			break;
@@ -533,11 +537,12 @@ static void *ubdsrv_io_handler_fn(void *data)
 				IORING_ENTER_GETEVENTS);
 		reapped = ubdsrv_reap_events_uring(&q->ring,
 				ubdsrv_handle_cqe, NULL);
-		INFO(syslog(LOG_INFO, "io_submit %d, submitted %d, reapped %d",
-				to_submit, submitted, reapped));
+		INFO(syslog(LOG_INFO, "%s: io_submit %d, submitted %d, reapped %d",
+				__func__, to_submit, submitted, reapped));
 	} while (1);
 	
-	INFO(syslog(LOG_INFO, "thread of qid: %d ready to exit\n", q->q_id));
+	syslog(LOG_INFO, "%s: thread of qid: %d ready to exit\n",
+			__func__, q->q_id);
 
 	return NULL;
 }
@@ -557,7 +562,7 @@ static void ubdsrv_io_handler(void *data)
 	snprintf(buf, 32, "%s-%d", "ubdsrvd", dev_id);
 	openlog(buf, LOG_PID, LOG_USER);
 
-	syslog(LOG_INFO, "start ubdsrv io daemon");
+	syslog(LOG_INFO, "%s: start ubdsrv io daemon", __func__);
 
 	/* create pid file and lock it, so that others can't */
 	snprintf(pid_file, 64, "%s-%d.pid", UBDSRV_PID_FILE, dev_id);
@@ -584,7 +589,8 @@ static void ubdsrv_io_handler(void *data)
 
 	ret = ubdsrv_init(ctrl_dev, &this_dev);
 	if (ret) {
-		syslog(LOG_ERR, "start ubsrv failed %d", ret);
+		syslog(LOG_ERR, "%s: start ubsrv failed %d",
+				__func__, ret);
 		goto out;
 	}
 
@@ -593,7 +599,7 @@ static void ubdsrv_io_handler(void *data)
 		pthread_create(&this_dev.threads[i], NULL, 
 			ubdsrv_io_handler_fn, this_dev.queues[i]);
 
-	syslog(LOG_INFO, "ubdsrv io daemon running...");
+	syslog(LOG_INFO, "%s: ubdsrv io daemon running...", __func__);
 
 	/*
  	 * Now STOP DEV ctrl command has been sent to /dev/ubd-control
@@ -602,11 +608,11 @@ static void ubdsrv_io_handler(void *data)
 	 */
 	for(i = 0; i < nr_queues; i++) {
 		pthread_join(this_dev.threads[i], NULL);
-		syslog(LOG_INFO, "thread of q_id %d joined\n", 
+		syslog(LOG_INFO, "%s: thread of q_id %d joined\n", 
 				__func__, i);
 	}
 
-	syslog(LOG_INFO, "end ubdsrv io daemon");
+	syslog(LOG_INFO, "%s: end ubdsrv io daemon", __func__);
 	
 	ubdsrv_deinit(&this_dev);
 

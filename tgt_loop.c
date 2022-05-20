@@ -117,8 +117,8 @@ static int loop_handle_io_async(struct ubdsrv_dev *dev, int qid, int tag)
 	unsigned index, tail = prep_queue_io_cmd(q);
 
 	if (tail + 1 == atomic_load_acquire(ring->head)) {
-		syslog(LOG_INFO, "ring is full, tail %u head %u\n", tail,
-				*ring->head);
+		syslog(LOG_INFO, "%s: ring is full, tail %u head %u\n",
+				__func__, tail, *ring->head);
 		return -1;
 	}
 
@@ -154,7 +154,8 @@ static int loop_handle_io_async(struct ubdsrv_dev *dev, int qid, int tag)
 	INFO(syslog(LOG_INFO, "%s: ubd io %x %llx %u\n", __func__,
 			iod->op_flags, iod->start_sector, iod->nr_sectors));
 	INFO(syslog(LOG_INFO, "%s: queue io op %d(%llu %llx %llx)"
-				" (qid %d tag %u, cmd_op %u target: %d, user_data %llx) iof %x\n",
+				" (qid %d tag %u, cmd_op %u target %d,"
+				" user_data %llx) iof %x\n",
 			__func__, io_op, sqe->off, sqe->len, sqe->addr,
 			q->q_id, tag, io_op, 1, sqe->user_data, io->flags));
 

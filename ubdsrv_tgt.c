@@ -45,7 +45,8 @@ int ubdsrv_prepare_io(struct ubdsrv_tgt_info *tgt)
 	if (tgt->ops->list_tgt)
 		tgt->ops->list_tgt(tgt);
 	else
-		snprintf(cdev->shm_addr, UBDSRV_SHM_SIZE, "target type %s",
+		cdev->shm_offset += snprintf(cdev->shm_addr + cdev->shm_offset,
+				UBDSRV_SHM_SIZE, "target type %s",
 				tgt->ops->name);
 
 	if (tgt->ops->prepare_io)
