@@ -114,7 +114,7 @@ static void ubdsrv_dev_deinit(struct ubdsrv_ctrl_dev *dev)
 
 static struct ubdsrv_ctrl_dev *ubdsrv_dev_init(int dev_id, bool zcopy)
 {
-	struct ubdsrv_ctrl_dev *dev = malloc(sizeof(*dev));
+	struct ubdsrv_ctrl_dev *dev = calloc(1, sizeof(*dev));
 	struct ubdsrv_ctrl_dev_info *info = &dev->dev_info;
 
 	if (!dev)
