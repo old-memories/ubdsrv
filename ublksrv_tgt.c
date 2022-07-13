@@ -280,6 +280,8 @@ static unsigned long long get_dev_blocks(struct ublksrv_ctrl_dev *ctrl_dev,
 	return dev_blocks;
 }
 
+#define UBLK_F_URING_CMD_COMP_IN_TASK  (1UL << 8)
+
 static int cmd_dev_add(int argc, char *argv[])
 {
 	static const struct option longopts[] = {
@@ -289,6 +291,7 @@ static int cmd_dev_add(int argc, char *argv[])
 		{ "depth",		1,	NULL, 'd' },
 		{ "zero_copy",		1,	NULL, 'z' },
 		{ "refetch",		1,	NULL, 'r' },
+		{ "uring_comp",		1,	NULL, 'u' },
 		{ NULL }
 	};
 	struct ublksrv_dev_data data = {0};
@@ -297,6 +300,7 @@ static int cmd_dev_add(int argc, char *argv[])
 	int opt, ret, zcopy = 0, pin_page = 0;
 	int daemon_pid;
 	int refetch = 0;
+	int uring_cmd = 0;
 
 	data.queue_depth = DEF_QD;
 	data.nr_hw_queues = DEF_NR_HW_QUEUES;
@@ -304,7 +308,7 @@ static int cmd_dev_add(int argc, char *argv[])
 	data.block_size = 512;
 	data.ublksrv_flags |= UBLKSRV_F_HAS_IO_DAEMON;
 
-	while ((opt = getopt_long(argc, argv, "-:t:n:d:q:p:r:z",
+	while ((opt = getopt_long(argc, argv, "-:t:n:d:q:p:r:u:z",
 				  longopts, NULL)) != -1) {
 		switch (opt) {
 		case 'n':
@@ -329,6 +333,9 @@ static int cmd_dev_add(int argc, char *argv[])
 		case 'r':
 			refetch = strtol(optarg, NULL, 10);
 			break;
+		case 'u':
+			uring_cmd = strtol(optarg, NULL, 10);
+			break;
 		}
 	}
 	data.rq_max_blocks = DEF_BUF_SIZE / data.block_size;
@@ -340,6 +347,8 @@ static int cmd_dev_add(int argc, char *argv[])
 		data.flags[0] |= UBLK_F_PIN_PAGES_FOR_IO;
 	if (refetch)
 		data.flags[0] |= UBLK_F_NEED_REFETCH;
+	if (uring_cmd)
+	data.flags[0] |= UBLK_F_URING_CMD_COMP_IN_TASK;
 
 	//optind = 0;	/* so that tgt code can parse their arguments */
 	data.tgt_argc = argc;
